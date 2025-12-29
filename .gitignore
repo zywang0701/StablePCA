@@ -1,0 +1,92 @@
+# Directories to ignore
+archive/
+Code-notRelease/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Data files - ignore all data files to avoid committing large datasets
+*.h5ad
+*.pkl
+*.pkl.gz
+*.h5
+*.hdf5
+*.csv
+*.tsv
+*.rds
+*.mat
+*.feather
+*.parquet
+*.arrow
+*.xlsx
+*.xls
+*.db
+*.sqlite
+*.sqlite3
+*.hdf
+*.nc
+*.npy
+*.npz
+# Compressed data files
+*.gz
+*.bz2
+*.xz
+*.zip
+*.tar
+*.tar.gz
+*.tar.bz2
+
+# Results (optional - uncomment if you don't want to track result files)
+# saved_results/
+
+# Figures (optional - uncomment if you don't want to track generated figures)
+# Figures/
+
+# Logs
+*.log
+
+# Environment variables
+.env
+.env.local
+
