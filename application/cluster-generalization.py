@@ -73,6 +73,16 @@ def explained_variance_samples(X, M):
     sq_resid = np.sum(resid**2, axis=1)   # (n,)
     return np.mean(sq_norm - sq_resid)
 
+
+def batch_scale(X):
+    """
+    Scale used in the normalized metric denominator:
+        (1/n) * sum_i ||x_i||^2
+    """
+    sq_norm = np.sum(X**2, axis=1)  # (n,)
+    return float(np.mean(sq_norm))
+
+
 def rotation_test(
     X_list,
     n_components=50,
@@ -134,6 +144,10 @@ def rotation_test(
     pooled_in_worst, pooled_out_worst = [], []
     squared_in_worst, squared_out_worst = [], []
 
+    # Track the largest scale we've ever seen across all batches
+    # scale(X) = (1/n) sum_i ||x_i||^2 for a given batch matrix X
+    max_scale_global = -np.inf
+
     train_idx_list, test_idx_list = [], []
 
     print(f"[Job {job_id}] Starting rotation test over {len(shard_combos)} groups...")
@@ -192,21 +206,27 @@ def rotation_test(
         M_pooled = pca_pooled.components_.T @ pca_pooled.components_
 
         # --------- Evaluate in-dist (train batches) ----------
+        for i in train_idx:
+            max_scale_global = max(max_scale_global, batch_scale(X_list[i]))
         stable_train_scores = [explained_variance_samples(X_list[i], M_stable) for i in train_idx]
         fair_train_scores = [explained_variance_samples(X_list[i], M_fair) for i in train_idx]
         pooled_train_scores = [explained_variance_samples(X_list[i], M_pooled) for i in train_idx]
         squared_train_scores = [explained_variance_samples(X_list[i], M_squared) for i in train_idx]
 
+        
         stable_in_worst.append(min(stable_train_scores))
         fair_in_worst.append(min(fair_train_scores))
         pooled_in_worst.append(min(pooled_train_scores))
         squared_in_worst.append(min(squared_train_scores))
 
         # --------- Evaluate out-of-dist (test batches) ----------
+        for i in test_idx:
+            max_scale_global = max(max_scale_global, batch_scale(X_list[i]))
         stable_test_scores = [explained_variance_samples(X_list[i], M_stable) for i in test_idx]
         fair_test_scores = [explained_variance_samples(X_list[i], M_fair) for i in test_idx]
         pooled_test_scores = [explained_variance_samples(X_list[i], M_pooled) for i in test_idx]
         squared_test_scores = [explained_variance_samples(X_list[i], M_squared) for i in test_idx]
+
 
         stable_out_worst.append(min(stable_test_scores))
         fair_out_worst.append(min(fair_test_scores))
@@ -225,6 +245,7 @@ def rotation_test(
         "pooled_out": pooled_out_worst,
         "squared_in": squared_in_worst,
         "squared_out": squared_out_worst,
+        "max_scale_global": float(max_scale_global),
     }
     return results
  
@@ -234,8 +255,17 @@ if __name__ == "__main__":
     import argparse
     import pickle
     
-    with open("Real-SingleCell/RNA.pkl", "rb") as f:
-        X_list = pickle.load(f)
+    # Try application/RNA.pkl first (run from project root), then Real-SingleCell/RNA.pkl
+    for p in ["application/RNA.pkl", "Real-SingleCell/RNA.pkl"]:
+        if Path(p).exists():
+            with open(p, "rb") as f:
+                X_list = pickle.load(f)
+            break
+    else:
+        raise FileNotFoundError(
+            "RNA.pkl not found. Prepare it from h5ad (see commented code at top of this file) "
+            "and place in application/ or Real-SingleCell/"
+        )
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--job-id", type=int, default=None,
@@ -244,6 +274,8 @@ if __name__ == "__main__":
                         help="Total number of parallel jobs.")
     parser.add_argument("--max-groups", type=int, default=10,
                         help="Max # of rotations per job.")
+    parser.add_argument("--n-components", type=int, nargs='+', default=[50, 100, 150],
+                        help="List of n_components values to test (default: [50, 100, 150]).")
     args = parser.parse_args()
 
     # Resolve job_id
@@ -253,22 +285,41 @@ if __name__ == "__main__":
         job_id = int(os.environ.get("SLURM_ARRAY_TASK_ID", "0"))
 
     num_jobs = args.num_jobs
+    n_components_list = args.n_components
 
-    results = rotation_test(
-        X_list,
-        n_components=50,
-        train_size=8,
-        max_groups=args.max_groups,
-        job_id=job_id,
-        num_jobs=num_jobs,
-        shuffle_seed=0,
-        max_iter=1000,
-        tol=1e-6,
-        verbose=100,
-    )
+    print(f"Running rotation test for n_components: {n_components_list}")
+    print(f"Job ID: {job_id}, Total jobs: {num_jobs}")
+    
+    # Run rotation test for each n_components value
+    all_results = {}
+    
+    for n_comp in n_components_list:
+        print(f"\n{'='*60}")
+        print(f"Running rotation test with n_components={n_comp}")
+        print(f"{'='*60}")
+        
+        results = rotation_test(
+            X_list,
+            n_components=n_comp,
+            train_size=8,
+            max_groups=args.max_groups,
+            job_id=job_id,
+            num_jobs=num_jobs,
+            shuffle_seed=0,
+            max_iter=1000,
+            tol=1e-6,
+            verbose=100,
+        )
+        
+        all_results[f"n_components_{n_comp}"] = results
+        print(f"Completed n_components={n_comp}")
 
+    # Save results
     os.makedirs("results", exist_ok=True)
     out_path = f"results/rotation_test_results_job{job_id}.pkl"
     with open(out_path, "wb") as f:
-        pickle.dump(results, f)
-    print(f"Saved to {out_path}")
+        pickle.dump(all_results, f)
+    print(f"\n{'='*60}")
+    print(f"Saved results to {out_path}")
+    print(f"Results contain {len(all_results)} different n_components values: {list(all_results.keys())}")
+    print(f"{'='*60}")

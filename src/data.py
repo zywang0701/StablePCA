@@ -57,7 +57,7 @@ def generate_stablepca_data(
     # ------------------------------------------------------
     # 3. Style scales t_l
     # ------------------------------------------------------
-    t_list = rng.uniform(low=0.2, high=3.0, size=L)
+    t_list = rng.uniform(low=0.2, high=2.0, size=L)
 
     # ------------------------------------------------------
     # 4. Generate source data
@@ -128,7 +128,7 @@ def generate_stablepca_data_fix(
     # ------------------------------------------------------
     # 3. Style scales t_l
     # ------------------------------------------------------
-    t_list = rng1.uniform(low=0.2, high=3.0, size=L)
+    t_list = rng1.uniform(low=0.2, high=2.0, size=L)
 
     # ------------------------------------------------------
     # 4. Generate source data

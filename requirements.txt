@@ -1,28 +1,26 @@
-# Core numerical computing libraries
+# Core numerical computing
 numpy>=1.20.0
 scipy>=1.7.0
 scikit-learn>=0.24.0
 
-# Optimization library (for baseline methods)
-cvxpy>=1.1.0
+# Optimization (for baseline methods, e.g. fair_pca_multisource)
+cvxpy>=1.6.4
 
 # Visualization
 matplotlib>=3.3.0
-seaborn>=0.11.0
-umap-learn>=0.5.0
 
-# Data handling and storage
+# Data handling
 pandas>=1.2.0
 h5py>=3.0.0
 
-# Single-cell data analysis
+# Single-cell application (cluster-generalization, downstream)
 scanpy>=1.8.0
 anndata>=0.8.0
 
-# Jupyter environment
+# Jupyter (for notebooks)
 jupyter>=1.0.0
 ipykernel>=6.0.0
 notebook>=6.0.0
 
-# Utility libraries
+# Utilities
 tqdm>=4.60.0

@@ -1,128 +1,72 @@
-# StablePCA
+# StablePCA (2026-Mar Release)
 
-Stable Principal Component Analysis (StablePCA) for Multi-Source Data
+This folder contains the code to reproduce the results in the paper:
 
-## Overview
+**StablePCA: Distributionally Robust Learning of Shared Representations from Multi-Source Data**  
+[https://arxiv.org/pdf/2505.00940](https://arxiv.org/pdf/2505.00940)
 
-StablePCA is a principal component analysis method for multi-source data that obtains stable and fair dimensionality reduction representations across different data sources by optimizing a min-max objective function. This project implements two main algorithms:
-- **PCA_MP**: Implementation based on the Mirror-Prox algorithm
-- **PCA_Dual**: Implementation based on the dual formulation
-
-## Project Structure
+## Folder Structure
 
 ```
 StablePCA/
-├── src/                    # Core source code
-├── illustrations/          # Paper illustration examples
-├── simulations/            # Simulation experiments and visualization
-├── application/            # Real-world application examples
-├── saved_results/          # Saved experimental results
-└── Figures/                # Generated figures
+├── src/                    # Core algorithms
+├── illustrations/          # Illustration notebooks
+├── simulations/            # Simulation scripts
+├── application/            # Real-data application (single-cell RNA)
+├── README.md
+├── requirements.txt
+└── LICENSE
 ```
 
-For detailed project structure, see [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md).
+## Contents
 
-## Installation
+### `src/` — Core Algorithms
 
-### Install Dependencies with pip
+- **PCAalg.py**: Main implementations
+  - `PCA_MP`: Mirror-Prox algorithm for StablePCA, FairPCA, SquaredPCA
+  - `PCA_Dual`: Dual formulation for multi-source PCA
+- **data.py**: Data generation for simulations
+- **utils.py**: Utilities
+- **prev_methods.py**: Previous SDP-based FairPCA method
 
-```bash
-pip install -r requirements.txt
-```
+### `illustrations/` — Illustration Notebooks
 
-### Main Dependencies
+- **illus-1.ipynb**: Illustration of StablePCA vs. PooledPCA
+- **illus-2.ipynb**: Illustration of StablePCA vs. alternative PCAs
 
-- **Core Computing**: numpy, scipy, scikit-learn
-- **Optimization**: cvxpy (for baseline methods)
-- **Visualization**: matplotlib, seaborn, umap-learn
-- **Data Handling**: pandas, h5py, anndata, scanpy (for single-cell data analysis)
-- **Jupyter**: jupyter, ipykernel, notebook
-- **Utilities**: tqdm (progress bars)
+### `simulations/` — Simulation Scripts
 
-See `requirements.txt` for the complete dependency list.
+- **simu-generalization.py**: Generalization experiment (train/test split across sources)
+- **simu-finitesample.py**: Finite-sample convergence
+- **simu_fairpca.py**: Fair PCA comparison (PCA_MP vs SDP-based `fair_pca_multisource`)
 
-## Quick Start
+### `application/` — Real Single-Cell RNA Application
 
-### 1. Basic Usage
+- **cluster-generalization.py**: Cluster-based generalization experiment on RNA data
+- **RNA.pkl**: Preprocessed RNA dataset (12 batches) — *not included*; prepare from h5ad using the commented code at the top of `cluster-generalization.py`, then save to `application/RNA.pkl`
+- **plot-singlecell.ipynb**: Visualization of results (boxplots, worst-case explained variance)
+- **downstream.ipynb**: Downstream analysis and visualization
 
-```python
-from src.PCAalg import PCA_MP
-import numpy as np
+## Usage
 
-# Prepare multi-source data
-X_list = [X1, X2, X3, X4]  # Each X_i is an (n_i, p) data matrix
-
-# Create model and fit
-pca = PCA_MP(n_components=10, method='stable')
-pca.fit(X_list)
-
-# Get projection matrix
-pca.M_proj  # Project using components_
-```
-
-### 2. Run Simulation Experiments
-
-#### Finite-Sample Performance Experiments
-
-```bash
-python simulations/simu-finitesample.py
-```
-
-Results will be saved to the `saved_results/` directory. Visualize results using `simulations/plot-finitesample.ipynb`.
-
-#### Out-of-Distribution Generalization Experiments
-
-```bash
-python simulations/simu-generalization.py
-```
-
-Visualize results using `simulations/plot-generalization.ipynb`.
-
-### 3. Visualize Experimental Results
-
-- **Finite-sample results**: Run `simulations/plot-finitesample.ipynb`
-- **Generalization results**: Run `simulations/plot-generalization.ipynb`
-- **Paper illustrations**: Run `illustrations/illus-1.ipynb` and `illustrations/illus-2.ipynb`
-
-### 4. Real-World Application Examples
-
-#### Single-Cell Data Analysis
-
-The project includes a complete analysis pipeline for single-cell data:
-
-1. **Clustering Generalization Experiment**:
+1. Install dependencies:
    ```bash
+   pip install -r requirements.txt
+   ```
+
+2. Run from the project root (e.g., `StablePCA/`):
+   ```bash
+   cd StablePCA
+   python simulations/simu-generalization.py
+   python simulations/simu_fairpca.py
    python application/cluster-generalization.py
    ```
 
-2. **Downstream Analysis**:
-   - Open `application/downstream.ipynb`
-   - Follow the instructions in the notebook to run the complete analysis pipeline
+3. For notebooks, ensure the working directory is the project root so `from src.PCAalg import ...` works.
 
-3. **Visualization**:
-   - Run `application/plot-singlecell.ipynb` to view visualization results
+## Methods
 
-## Algorithm Description
-
-### PCA_MP (Mirror-Prox Algorithm)
-
-`PCA_MP` solves a min-max optimization problem via the Mirror-Prox algorithm:
-- Primal problem: Find the optimal projection matrix that minimizes the worst-case loss across all data sources
-- Supports three variants: `'stable'` (default), `'fair'`, and `'squared'`
-
-### PCA_Dual (Dual Algorithm)
-
-`PCA_Dual` first optimizes weights on the simplex, then computes the top-k eigenvectors of the weighted covariance matrix:
-- More computationally efficient, suitable for large-scale data
-- Also supports `'stable'`, `'fair'`, and `'squared'` variants
-
-## Results
-
-All experimental results are saved in the `saved_results/` directory:
-- `results-Finite_*.pkl`: Finite-sample experiment results
-- `results-OOD_*.pkl`: Out-of-distribution generalization results
-- `real_application/`: Real application results
-
-Generated figures are saved in the `Figures/` directory.
-
-
+- **StablePCA**: Minimizes worst-case explained variance across sources
+- **FairPCA**: Fair variant with regularized covariance
+- **SquaredPCA**: Squared-loss variant
+- **Pooled PCA**: Standard PCA on concatenated data (baseline)

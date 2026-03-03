@@ -35,7 +35,7 @@ def fair_pca_multisource(groups, d, sdp_solver="SCS", lp_solver="ECOS"):
     Returns
     -------
     P_star : ndarray, shape (n, n)
-        The final projection matrix P^*.
+        The final projection matrix P^* with exact rank d.
     """
     # --------- basic checks ----------
     L = len(groups)
@@ -67,13 +67,51 @@ def fair_pca_multisource(groups, d, sdp_solver="SCS", lp_solver="ECOS"):
         )
     constraints += [
         cp.trace(P) <= d,
-        (np.eye(n) - P) >> 0,  # P ⪯ I
+        P << cp.Constant(np.eye(n)),  # P ⪯ I
     ]
 
     prob_sdp = cp.Problem(cp.Minimize(z), constraints)
-    prob_sdp.solve(solver=sdp_solver, verbose=False)
-    if P.value is None:
-        raise RuntimeError("SDP did not converge. Try a different solver.")
+    
+    # Note: CVXPY >= 1.6.4 fixes the negative axis index bug for large SDP problems
+    # Determine which solvers support PSD constraints (SCS and CVXOPT)
+    psd_capable_solvers = []
+    if "SCS" in cp.installed_solvers():
+        psd_capable_solvers.append("SCS")
+    if "CVXOPT" in cp.installed_solvers():
+        psd_capable_solvers.append("CVXOPT")
+    
+    # Build solver list (prioritize specified solver if it's PSD-capable)
+    solver_list = []
+    if sdp_solver in psd_capable_solvers:
+        solver_list.append(sdp_solver)
+    solver_list.extend([s for s in psd_capable_solvers if s != sdp_solver])
+    
+    if not solver_list:
+        raise RuntimeError(
+            "No PSD-capable solvers available. Install SCS (recommended) or CVXOPT. "
+            f"Installed solvers: {cp.installed_solvers()}"
+        )
+    
+    # Try solving with available PSD-capable solvers
+    solved = False
+    last_error = None
+    
+    for solver in solver_list:
+        try:
+            prob_sdp.solve(solver=solver, verbose=False)
+            if P.value is not None:
+                solved = True
+                break
+        except Exception as err:
+            last_error = err
+            continue
+    
+    if not solved:
+        error_msg = f"SDP solver failed. Tried solvers: {solver_list}\n"
+        if last_error:
+            error_msg += f"Last error: {str(last_error)}\n"
+        error_msg += f"Ensure cvxpy >= 1.6.4 is installed for large dimension support."
+        raise RuntimeError(error_msg)
 
     P_hat = 0.5 * (P.value + P.value.T)  # symmetrize numerically
 
@@ -106,7 +144,15 @@ def fair_pca_multisource(groups, d, sdp_solver="SCS", lp_solver="ECOS"):
     ]
 
     prob_lp = cp.Problem(cp.Minimize(z_lp), constraints_lp)
-    prob_lp.solve(solver=cp.CLARABEL, verbose=False)
+    # Try the specified solver, fall back to CLARABEL if not available
+    try:
+        prob_lp.solve(solver=lp_solver, verbose=False)
+        if lam.value is None:
+            # If solver didn't work, try CLARABEL
+            prob_lp.solve(solver=cp.CLARABEL, verbose=False)
+    except Exception:
+        # If solver is not available, use CLARABEL
+        prob_lp.solve(solver=cp.CLARABEL, verbose=False)
     if lam.value is None:
         raise RuntimeError("LP did not converge. Try a different solver.")
 
@@ -116,7 +162,18 @@ def fair_pca_multisource(groups, d, sdp_solver="SCS", lp_solver="ECOS"):
     lam_star = 1.0 - np.sqrt(1.0 - lam_bar)
     lam_star = np.clip(lam_star, 0.0, 1.0)
 
-    P_star = U_eig @ np.diag(lam_star) @ U_eig.T
+    # --------- Step 6: Ensure exact rank d by keeping only top d eigenvalues ----------
+    # Sort eigenvalues in descending order
+    idx_sorted = np.argsort(-lam_star)  # descending order
+    lam_star_sorted = lam_star[idx_sorted]
+    U_eig_sorted = U_eig[:, idx_sorted]
+    
+    # Keep only top d eigenvalues, set rest to zero
+    lam_star_rank_d = np.zeros_like(lam_star_sorted)
+    lam_star_rank_d[:d] = lam_star_sorted[:d]
+    
+    # Construct projection matrix with exact rank d
+    P_star = U_eig_sorted @ np.diag(lam_star_rank_d) @ U_eig_sorted.T
 
     return P_star
 

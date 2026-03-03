@@ -2,7 +2,7 @@ import numpy as np
 from scipy.sparse.linalg import eigsh
 from scipy.optimize import root_scalar
 from tqdm import tqdm
-from .utils import get_sigma, real_sym, real_vec, spd_logm
+from .utils import get_sigma, spd_logm
 
 
 class PCA_MP:
@@ -28,16 +28,16 @@ class PCA_MP:
         self.w = None
         self.method = 'stable' if method is None else method
         
-    def fit(self, X_list, Sigma_list=None, M_init=None, w_init=None, eta_init=1,
+    def fit(self, X_list, Sigma_list=None, M_init=None, eta_init=10,
             max_iter=1000, tol=1e-6, verbose=True, check_dual=False, 
-            decay_every=500, eta_decay=0.5):
+            decay_every=500, eta_decay=0.5, use_fast_logm=True,
+            init_iter=50, check_freq=100):
         """
         Args:
             X_list: list of L data matrices from different sources.
             Sigma_list: list of L covariance matrices. Defaults to None.
                 If None, then X_list is used to compute empirical covariances.
             M_init: initial value for M. Defaults to None.
-            w_init: initial value for w. Defaults to None.
             eta_init (int, optional): initial multiplier factor for learning rate. Defaults to 1.
             max_iter (int, optional): maximum number of iterations. Defaults to 1000.
             tol (float, optional): tolerance for convergence. Defaults to 1e-6.
@@ -48,6 +48,14 @@ class PCA_MP:
             check_dual (bool, optional): whether to check duality gap. Defaults to False.
             decay_every (int, optional): number of iterations to wait before decaying learning rate. Defaults to 500.
             eta_decay (float, optional): factor by which to decay learning rate. Defaults to 0.5.
+            use_fast_logm (bool, optional): if True, use partial eigendecomposition for log(M) 
+                when dimension is large. This is much faster for low-rank M. Defaults to True.
+            init_iter (int, optional): number of initial iterations before using fast_logm.
+                During first init_iter iterations, full eigendecomposition is used to ensure 
+                accuracy. After init_iter, fast_logm is enabled. Defaults to 50.
+            check_freq (int, optional): frequency of checking primal/dual values for convergence.
+                Only checks every `check_freq` iterations to save computation time. 
+                Defaults to 100. Set to 1 to check every iteration.
         """
         # Interpret verbose
         if isinstance(verbose, bool):
@@ -63,15 +71,14 @@ class PCA_MP:
         if Sigma_list is None:
             Sigma_list = [get_sigma(X, demean=False) for X in X_list]
         
-        # Apply method-specific transformation to Sigma_list
-        L_op = np.max([np.linalg.norm(Sigma, ord=2) for Sigma in Sigma_list])
-        Sigma_list_normalized = [Sigma / L_op for Sigma in Sigma_list]
-        self.L_op = L_op
+        # Store flags for use in _update_M_w
+        self._use_fast_logm = use_fast_logm
         
-        # Transform Sigma based on method
+        # Step 1: Apply method-specific transformation to Sigma_list (regularization)
+        # This computes Sigma_reg_list from original Sigma_list
         Sigma_reg_list = []
         for l in range(L):
-            Sigma_l = Sigma_list_normalized[l]
+            Sigma_l = Sigma_list[l]
             eval, _ = np.linalg.eigh(Sigma_l)
             if self.method == 'fair':
                 idx = np.argsort(eval)[::-1]
@@ -87,12 +94,18 @@ class PCA_MP:
                 raise ValueError(f"Unknown method: {self.method}. Must be 'stable', 'fair', or 'squared'.")
             Sigma_reg_list.append(Sigma_l_reg)
         
-        Sigma_stack = np.stack(Sigma_reg_list)
+        # Step 2: Normalize based on Sigma_reg_list scale (not original Sigma_list)
+        # The normalization scale should depend on the scale of regularized Sigma
+        L_op = np.max([np.linalg.norm(Sigma_reg, ord=2) for Sigma_reg in Sigma_reg_list])
+        Sigma_reg_list_normalized = [Sigma_reg / L_op for Sigma_reg in Sigma_reg_list]
+        self.L_op = L_op
+        
+        Sigma_stack = np.stack(Sigma_reg_list_normalized)
 
         # --------- Initialize Parameters --------- #        
-        w_curr = np.ones(L) / L if w_init is None else w_init
+        w_curr = np.ones(L) / L
         Sigma_w = np.einsum('i,ijk->jk', w_curr, Sigma_stack) 
-        M_curr = self._best_rank_k_approximation(Sigma_w, self.n_components) if M_init is None else real_sym(M_init)
+        M_curr = np.eye(d) * self.n_components / d if M_init is None else M_init
 
         # parameters for learning rate (now L_op_normalized = 1)
         a = np.log(L)
@@ -105,69 +118,168 @@ class PCA_MP:
         if print_freq > 0:
             print(f"Initial step size eta_M = {eta_M:.3e} and eta_w = {eta_w:.3e}")
 
-        M_mid_list, w_mid_list = [], []
+        # Use incremental averaging to avoid O(N × p²) cost at each iteration
+        # Initialize running averages
+        M_avg = M_curr.copy()
+        w_avg = w_curr.copy()
+        n_avg = 0  # Count of iterates averaged so far
+        
+        # Track best model (smallest duality gap) if check_dual
+        best_duality_gap = float('inf')
+        best_M_avg = None
+        best_w_avg = None
+        best_iter = 0
+        prev_duality_gap = float('inf')
         
         primal = self._compute_primal(Sigma_stack, M_curr)
         prev_primal = primal # for monitoring local change
         # optimization loop
         for iter in range(max_iter):
+            # Determine if we should use fast logm (only after init_iter iterations)
+            # This ensures full accuracy in early iterations, then switches to fast approximation
+            use_fast_this_iter = (hasattr(self, '_use_fast_logm') and 
+                                  self._use_fast_logm and 
+                                  iter >= init_iter and 
+                                  M_curr.shape[0] > 30)
+            
+            # Adaptive n_eig selection: gradually reduce from 2k to 1k as we converge
+            # This exploits the fact that M becomes more low-rank as iterations progress
+            if use_fast_this_iter and hasattr(self, 'n_components') and self.n_components is not None:
+                k = self.n_components
+                # Linearly interpolate: start with 2k at iter=init_iter, reduce to k at iter=max_iter
+                iter_progress = (iter - init_iter) / max(1, max_iter - init_iter)  # 0 to 1
+                n_eig_factor = 2.0 - iter_progress  # 2.0 -> 1.0
+                adaptive_n_eig = max(k, int(n_eig_factor * k))
+            else:
+                adaptive_n_eig = None  # Will use default in _update_M_w
             # ----------- First Step ---------- #
             ## starting from (M_curr, w_curr) to get (M_mid, w_mid)
             M_mid, w_mid = self._update_M_w(Sigma_stack, M_start=M_curr, w_start=w_curr, 
-            M_eval=M_curr, w_eval=w_curr, 
-            eta_M=eta_M, eta_w=eta_w, 
-            k=self.n_components)
-
-            M_mid_list.append(M_mid)
-            w_mid_list.append(w_mid)
+                M_eval=M_curr, w_eval=w_curr, 
+                eta_M=eta_M, eta_w=eta_w, 
+                k=self.n_components, use_fast_logm=use_fast_this_iter, 
+                n_eig_override=adaptive_n_eig if use_fast_this_iter else None)
 
             # ----------- Second Step ---------- #
             ## starting from (M_curr, w_curr) to update (M_curr, w_curr), but using (M_mid, w_mid) for gradients evaluation
             M_curr, w_curr = self._update_M_w(Sigma_stack, M_start=M_curr, w_start=w_curr, 
-            M_eval=M_mid, w_eval=w_mid, 
-            eta_M=eta_M, eta_w=eta_w, 
-            k=self.n_components)
+                M_eval=M_mid, w_eval=w_mid, 
+                eta_M=eta_M, eta_w=eta_w, 
+                k=self.n_components, use_fast_logm=use_fast_this_iter, 
+                n_eig_override=adaptive_n_eig if use_fast_this_iter else None)
             
-            # ----------- Average Iterates ---------- #
-            M_avg = np.mean(M_mid_list, axis=0)
-            w_avg = np.mean(w_mid_list, axis=0)
-            primal_curr = self._compute_primal(Sigma_stack, M_avg)
-            primal_diff = np.abs(prev_primal - primal_curr)
+            # ----------- Incremental Average Iterates ---------- #
+            # Update running average incrementally: O(p²) instead of O(N × p²)
+            # M_avg_new = (M_avg_old * n + M_mid) / (n + 1)
+            n_avg += 1
+            M_avg = (M_avg * (n_avg - 1) + M_mid) / n_avg
+            w_avg = (w_avg * (n_avg - 1) + w_mid) / n_avg
             
-            # compute dual and duality gap if needed
-            if check_dual:
-                dual_curr = self._compute_dual(Sigma_stack, w_avg)
-                dual_gap = np.abs(primal_curr - dual_curr)
+            # ----------- Check primal/dual and convergence (only every check_freq iterations) ---------- #
+            # Skip expensive primal/dual computation most of the time to save computation
+            # Only compute when needed for convergence checking or printing
+            should_check = ((iter + 1) % check_freq == 0) or (iter + 1 >= max_iter) or (iter + 1 < check_freq)
+            
+            if should_check:
+                primal_curr = self._compute_primal(Sigma_stack, M_avg)
+                primal_diff = np.abs(prev_primal - primal_curr)
+                
+                # compute dual and duality gap if needed
+                if check_dual:
+                    dual_curr = self._compute_dual(Sigma_stack, w_avg)
+                    dual_gap = np.abs(primal_curr - dual_curr) * L_op  # Scale by L_op for consistency
+                    
+                    # Track best model (smallest duality gap)
+                    if dual_gap < best_duality_gap:
+                        best_duality_gap = dual_gap
+                        best_M_avg = M_avg.copy()
+                        best_w_avg = w_avg.copy()
+                        best_iter = iter + 1
+                else:
+                    dual_curr = None
+                    dual_gap = None
             else:
+                # Skip computation, use cached values or None
+                primal_curr = None
+                primal_diff = None
                 dual_curr = None
                 dual_gap = None
 
             if print_freq > 0 and (iter + 1) % print_freq == 0:
-                log_info = f"Iter {iter + 1} | Diff primal: {primal_diff:.6e}"
-                if check_dual:
+                # Need to compute primal if not already computed for printing
+                if primal_curr is None:
+                    primal_curr = self._compute_primal(Sigma_stack, M_avg)
+                    primal_diff = np.abs(prev_primal - primal_curr) if prev_primal is not None else None
+                if check_dual and dual_curr is None:
+                    dual_curr = self._compute_dual(Sigma_stack, w_avg)
+                    dual_gap = np.abs(primal_curr - dual_curr) * L_op if primal_curr is not None else None
+                
+                log_info = f"Iter {iter + 1}"
+                if primal_diff is not None:
+                    log_info += f" | Diff primal: {primal_diff:.6e}"
+                if check_dual and dual_gap is not None:
                     log_info += f" | duality gap: {dual_gap:.6e}"
                 log_info += f" | eta: {eta:.3e}"
                 print(log_info)
 
-            # ----------- Check convergence ---------- #
+            # ----------- Check convergence (only if we computed primal_diff) ---------- #
             # Note: primal_diff and dual_gap are computed on normalized Sigma,
             # so their values are scaled by 1/L_op. However, relative errors are preserved,
             # so we can use the original tolerance thresholds.
-            if not check_dual:
-                # original stopping rule: only primal difference
-                if primal_diff < tol:
+            # Ensure minimum of 500 iterations for stability
+            min_iterations = 500
+            converged = False
+            early_stop_duality_gap = False
+            
+            if should_check and primal_diff is not None:
+                if iter + 1 >= min_iterations:
+                    if not check_dual:
+                        # original stopping rule: only primal difference
+                        if primal_diff < tol:
+                            converged = True
+                            if print_freq > 0:
+                                print(f"Converged at iteration {iter + 1}")
+                    else:
+                        # Check if duality gap is increasing (early stop condition)
+                        if dual_gap is not None:
+                            if dual_gap > prev_duality_gap and prev_duality_gap < float('inf'):
+                                # Duality gap is increasing, trigger early stop
+                                early_stop_duality_gap = True
+                                if print_freq > 0:
+                                    print(
+                                        f"\nEarly stopping at iteration {iter + 1}: "
+                                        f"duality gap increased ({prev_duality_gap:.6e} -> {dual_gap:.6e})"
+                                    )
+                                    print(
+                                        f"Best model found at iteration {best_iter} "
+                                        f"with duality gap {best_duality_gap:.6e}"
+                                    )
+                            else:
+                                # Update prev_duality_gap for next check
+                                prev_duality_gap = dual_gap
+                        
+                        # Regular convergence check
+                        if (primal_diff < tol) and (dual_gap is not None) and (dual_gap < 1e-2):
+                            converged = True
+                            if print_freq > 0:
+                                print(
+                                    f"Converged at iteration {iter + 1} "
+                                    f"(primal diff={primal_diff:.3e}, duality gap={dual_gap:.3e})"
+                                )
+            
+            # Stop if converged or duality gap is increasing
+            if converged or early_stop_duality_gap:
+                # If early stop due to increasing duality gap, use best model
+                if early_stop_duality_gap and best_M_avg is not None:
+                    M_avg = best_M_avg
+                    w_avg = best_w_avg
                     if print_freq > 0:
-                        print(f"Converged at iteration {iter + 1}")
-                    break
-            else:
-                # require BOTH primal stabilization and small duality gap
-                if (primal_diff < tol) and (dual_gap is not None) and (dual_gap < 1e-2):
-                    if print_freq > 0:
-                        print(
-                            f"Converged at iteration {iter + 1} "
-                            f"(primal diff={primal_diff:.3e}, duality gap={dual_gap:.3e})"
-                        )
-                    break
+                        print(f"Using best model from iteration {best_iter}")
+                break
+            
+            # Update prev_primal only when we computed primal_curr
+            if should_check and primal_curr is not None:
+                prev_primal = primal_curr
             
             # ----------- Adaptive step-size schedule ---------- #
             # simple decay: every `decay_every` iterations, shrink eta
@@ -182,11 +294,9 @@ class PCA_MP:
                         f"eta_M: {eta_old_M:.3e} -> {eta_M:.3e} | eta_w: {eta_old_w:.3e} -> {eta_w:.3e}"
                     )
 
-            prev_primal = primal_curr
-
         # --------- Finalize Projection Matrix --------- #
-        self.M = real_sym(M_avg)
-        self.w = real_vec(w_avg)
+        self.M = M_avg
+        self.w = w_avg
         
         # Considering that M is not sparse, we only output the top k eigenvectors
         eval, evec = np.linalg.eigh(self.M)
@@ -196,7 +306,7 @@ class PCA_MP:
         # Select top k eigenvalues and eigenvectors
         top_k_eigenvectors = evec_sorted[:, :self.n_components]
         self.components_ = top_k_eigenvectors.T
-        self.M_proj = real_sym(top_k_eigenvectors @ top_k_eigenvectors.T)
+        self.M_proj = top_k_eigenvectors @ top_k_eigenvectors.T
         
         X_all = np.vstack(X_list)
         self.mean_ = X_all.mean(axis=0)
@@ -204,9 +314,37 @@ class PCA_MP:
         X_proj = X_centered @ self.components_.T
         self.explained_variance_ = np.var(X_proj, axis=0)
         
+        # --------- Compute and print final duality gap (even if check_dual=False) --------- #
+        # Note: Sigma_stack is normalized, so we need to restore the scale by L_op
+        primal_final = self._compute_primal(Sigma_stack, self.M) * L_op
+        dual_final = self._compute_dual(Sigma_stack, self.w) * L_op
+        duality_gap_final = np.abs(primal_final - dual_final)
+        
+        # If check_dual and we found a better model earlier, report it
+        if check_dual and best_duality_gap < float('inf') and best_duality_gap < duality_gap_final:
+            if print_freq > 0:
+                print(f"\nNote: Best duality gap was {best_duality_gap:.6e} at iteration {best_iter}")
+                print(f"      Final duality gap is {duality_gap_final:.6e}")
+        
+        if print_freq > 0:
+            print(f"\nFinal results:")
+            print(f"  Primal value: {primal_final:.6e}")
+            print(f"  Dual value: {dual_final:.6e}")
+            print(f"  Duality gap: {duality_gap_final:.6e}")
+            if check_dual and best_iter > 0:
+                print(f"  Best duality gap: {best_duality_gap:.6e} (at iteration {best_iter})")
+        
         # Restore primal values by multiplying by L_op (since we optimized on normalized Sigma)
         self.primal_M = self._compute_primal(Sigma_stack, self.M) * L_op
         self.primal_M_proj = self._compute_primal(Sigma_stack, self.M_proj) * L_op
+        
+        # Store best duality gap info for reference
+        if check_dual:
+            self.best_duality_gap = best_duality_gap if best_duality_gap < float('inf') else duality_gap_final
+            self.best_iter = best_iter if best_iter > 0 else iter + 1
+        else:
+            self.best_duality_gap = duality_gap_final
+            self.best_iter = iter + 1
         
         
     # ----------------------------------------------- #
@@ -216,7 +354,6 @@ class PCA_MP:
         """
         Primal problem: given M, compute max_w -<M, Sigma(w)>
         """
-        M = real_sym(M)
         vals = np.array([-np.trace(Sigma.T @ M) for Sigma in Sigma_stack], dtype=float)
         return float(vals.max())
     
@@ -224,7 +361,6 @@ class PCA_MP:
         """
         Dual problem:Given w, compute min_M -<M, Sigma(w)>
         """
-        w = real_vec(w)
         Sigma_w = np.einsum('i,ijk->jk', w, Sigma_stack)
 
         # eigen-decomposition
@@ -234,7 +370,11 @@ class PCA_MP:
         M = U @ U.T
         return float(-np.trace(Sigma_w.T @ M))
 
-    def _update_M_w(self, Sigma_stack, M_start, w_start, M_eval, w_eval, eta_M, eta_w, k):
+    def _update_M_w(self, Sigma_stack, M_start, w_start, M_eval, w_eval, eta_M, eta_w, k, use_fast_logm=False, n_eig_override=None):
+        """
+        Returns:
+            M_new, w_new
+        """
         """
         Update M and w using the mirror-prox algorithm.
         Args:
@@ -246,6 +386,7 @@ class PCA_MP:
             eta_M: learning rate for M.
             eta_w: learning rate for w.
             k: number of components.
+            use_fast_logm: if True, use partial eigendecomposition for log(M).
         Returns:
             M_new: new iterate for M.
             w_new: new iterate for w.
@@ -253,19 +394,108 @@ class PCA_MP:
         # for omega
         traces = np.array([np.trace(Sigma.T @ M_eval) for Sigma in Sigma_stack])
         w_new = w_start * np.exp(- eta_w * traces)
-        w_new = real_vec(w_new)
         w_new = np.maximum(w_new, 0.0)   # clip tiny negative noise
         w_new = w_new / w_new.sum()
 
         # Mirror-prox "gradient" step
-        A = eta_M * np.einsum('i,ijk->jk', w_eval, Sigma_stack) + spd_logm(M_start)
-        A = real_sym(A)
-        eval, evec = np.linalg.eigh(A)
+        # Optimization: exploit low-rank structure of log_M
+        #
+        # Key insight: log_M = U_k @ diag(log(λ_k) - log(tol)) @ U_k.T + log(tol) * I
+        # - In U_k subspace: log_M has non-constant eigenvalues
+        # - In orthogonal complement: log_M ≈ log(tol) * I (constant)
+        # - So A's eigenvalues in orthogonal complement ≈ eta_M * (Sigma_w eigenvalues) + log(tol)
+        # - If eta_M is small, these are dominated by log(tol) ≈ -9.21
+        #
+        # Strategy: Only compute A's eigenvalues in U_k subspace and a few from Sigma_w
+        
+        p = M_start.shape[0]
+        Sigma_w = np.einsum('i,ijk->jk', w_eval, Sigma_stack)  # (p, p)
+        
+        # Use optimized low-rank computation if enabled
+        if use_fast_logm and p > 30 and k < p // 4:
+            # Step 1: Get log_M components (U_k and log eigenvalues)
+            # Use n_eig_override if provided (for adaptive selection), otherwise default to 2k
+            if n_eig_override is not None:
+                n_eig_fast = min(n_eig_override, p - 1)
+            else:
+                n_eig_fast = min(2 * k + 10, p - 1)
+            log_M, U_k, log_eval_k = spd_logm(M_start, n_eig=n_eig_fast, return_components=True)
+            # U_k: (p, n_eig_fast), log_eval_k: (n_eig_fast,) where log_eval_k = log(λ) - log(tol)
+            
+            try:
+                # Step 2: Compute A in U_k subspace
+                # A_kk = U_k.T @ A @ U_k = U_k.T @ (eta_M * Sigma_w + log_M) @ U_k
+                # Since log_M = U_k @ diag(log_eval_k) @ U_k.T + log(tol) * I,
+                # we have: A_kk = eta_M * (U_k.T @ Sigma_w @ U_k) + diag(log_eval_k) + log(tol) * I
+                log_tol = np.log(1e-8)  # Same tol as in spd_logm
+                Sigma_w_proj = U_k.T @ Sigma_w @ U_k  # (n_eig_fast, n_eig_fast)
+                A_kk = eta_M * Sigma_w_proj + np.diag(log_eval_k) + log_tol * np.eye(n_eig_fast)
+                
+                # Step 3: Compute eigenvalues in U_k subspace
+                eval_k, evec_k = np.linalg.eigh(A_kk)  # O(n_eig_fast³), fast!
+                # Note: eigh returns ascending order, so reverse
+                eval_k = eval_k[::-1]
+                evec_k = evec_k[:, ::-1]
+                
+                # Step 4: Project eigenvectors back to full space
+                evec_k_full = U_k @ evec_k  # (p, n_eig_fast)
+                
+                # Step 5: Handle eigenvalues in orthogonal complement
+                # Key insight: Since eta_M is typically 0.01-1 and log(tol) ≈ -18.42 is a large negative,
+                # in the orthogonal complement where log_M ≈ log(tol) * I,
+                # A's eigenvalues ≈ eta_M * (Sigma_w eigenvalues) + log(tol).
+                # Since eta_M * (Sigma_w eigenvalues) is typically << |log(tol)|,
+                # log(tol) dominates, so we can directly set these eigenvalues to log(tol).
+                #
+                # Only the U_k subspace has non-constant log_M eigenvalues, so those are the
+                # only ones we need to compute accurately.
+                
+                eval = eval_k
+                evec = evec_k_full
+                
+                # Pad with log(tol) eigenvalues for _solve_for_nu (need enough for accuracy)
+                # These represent eigenvalues in the orthogonal complement, all dominated by log(tol)
+                n_eig_needed = min(2 * k, p)
+                n_pad = max(0, n_eig_needed - len(eval))
+                if n_pad > 0:
+                    eval_pad = np.full(n_pad, log_tol)
+                    # For eigenvectors in orthogonal complement, use QR decomposition
+                    # to get orthonormal basis (exact eigenvectors don't matter since eigenvalues are constant)
+                    if n_eig_fast < p:
+                        Q, _ = np.linalg.qr(U_k, mode='complete')
+                        evec_pad = Q[:, n_eig_fast:min(n_eig_fast + n_pad, p)]
+                        if evec_pad.shape[1] < n_pad:
+                            # Shouldn't happen, but pad with zeros if needed
+                            zeros_pad = np.zeros((p, n_pad - evec_pad.shape[1]))
+                            evec_pad = np.hstack([evec_pad, zeros_pad])
+                    else:
+                        evec_pad = np.zeros((p, n_pad))
+                    
+                    eval = np.concatenate([eval, eval_pad])
+                    evec = np.hstack([evec, evec_pad])
+                    # Sort by eigenvalue (descending)
+                    idx_sort = np.argsort(eval)[::-1]
+                    eval = eval[idx_sort]
+                    evec = evec[:, idx_sort]
+                    
+            except Exception as e:
+                # Fallback to full computation if optimization fails
+                if use_fast_logm:
+                    log_M = spd_logm(M_start, n_eig=n_eig_fast)
+                else:
+                    log_M = spd_logm(M_start)
+                A = eta_M * Sigma_w + log_M
+                eval, evec = np.linalg.eigh(A)
+        else:
+            # Full eigendecomposition for small matrices or when k is large
+            log_M = spd_logm(M_start)
+            A = eta_M * Sigma_w + log_M
+            eval, evec = np.linalg.eigh(A)
 
         nu = self._solve_for_nu(eval, k)
         evals = np.minimum(np.exp(eval + nu), 1.0)
 
-        M_new = real_sym(evec @ np.diag(evals) @ evec.T)
+        M_new = evec @ np.diag(evals) @ evec.T
         return M_new, w_new
 
             
@@ -307,7 +537,7 @@ class PCA_MP:
         beta = (k * epsilon) / A.shape[0]
         P_k = U_k @ U_k.T
         M = alpha * P_k + beta * np.eye(A.shape[0]) # 
-        return real_sym(M)
+        return M
 
 
 class PCA_Dual:
@@ -443,7 +673,7 @@ class PCA_Dual:
             Sigma_w = np.tensordot(w, Sigma_stack, axes=(0, 0))  # (d, d)
 
             # Eigendecomposition for top-k eigenvalues/vectors
-            if (d > 50 and k < d // 2):
+            if (d > 30 and k < d // 2):
                 eval, evec = eigsh(Sigma_w, k=k, which='LA')
                 idx = np.argsort(eval)[::-1]
                 top_evals = eval[idx]
@@ -549,7 +779,7 @@ class PCA_Dual:
 
         # --- partial eigendecomp (fast for k << d) ---
         k = self.n_components
-        if (d > 50 and k < d // 2):
+        if (d > 30 and k < d // 2):
             eval, evec = eigsh(Sigma_w, k=k, which='LA')  # largest algebraic
             idx = np.argsort(eval)[::-1]
             top_evals = eval[idx]
