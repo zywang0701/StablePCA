@@ -50,6 +50,8 @@ venv.bak/
 *.h5ad
 *.pkl
 *.pkl.gz
+# Exception: RNA.pkl is tracked via Git LFS for reproducibility
+!application/RNA.pkl
 *.h5
 *.hdf5
 *.csv
