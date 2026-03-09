@@ -10,7 +10,7 @@ This repository contains the code to reproduce the results in the paper:
   ```bash
    pip install -r requirements.txt
   ```
-2. **RNA data** (for application experiments): Download `full12batch.h5ad` and run `data-preprocess.py` to generate `RNA.pkl`. See [Data](#data).
+2. **RNA data** (for application experiments): `full12batch.h5ad` is included in this repo (via Git LFS). Run `data-preprocess.py` to generate `RNA.pkl`. See [Data](#data).
 3. **Run from project root** so `from src.PCAalg import ...` works in notebooks.
 
 ---
@@ -105,7 +105,7 @@ jupyter notebook simulations/plot-generalization.ipynb
 **Example:**
 
 ```bash
-# 1. Download full12batch.h5ad (see Data section) and place in application/
+# 1. full12batch.h5ad is included in application/ (via Git LFS)
 
 # 2. Preprocess data to generate RNA.pkl
 python application/data-preprocess.py
@@ -128,7 +128,7 @@ The single-cell data is **publicly available** from:
 
 **[NeurIPS 2021: Multimodal Single-Cell Data Integration](https://openproblems.bio/events/2021-09_neurips)**
 
-We select the **12 batches** with **RNA+GEX+ADT** multimodalities. Download the source data, place `full12batch.h5ad` in `application/`, then run:
+We select the **12 batches** with **RNA+GEX+ADT** multimodalities. The file `full12batch.h5ad` is included in this repo (via Git LFS). Run:
 
 ```bash
 python application/data-preprocess.py
