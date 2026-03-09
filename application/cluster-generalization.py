@@ -9,54 +9,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.PCAalg import PCA_Dual
 from tqdm import tqdm
 
-"""Pre-processing RNA Data and Save
-"""
-# load_test = "Real-SingleCell/full12batch.h5ad"
-# # load_test1 = "real_data//full13batch//bmmc_CITE_RNA_counts.rds"
-# adata = sc.read_h5ad(load_test)
-# print(adata)
-
-# data = adata.X
-# metadata = adata.obs
-# genes = adata.var
-# metadata_use = metadata[["cell_type", "batch"]].copy()
-# metadata_use.columns = ["cell_type", "batch"]
-
-# # Split depending on omics
-# omics = genes["feature_types"].unique()
-# adata_omics = {view: adata[:, adata.var['feature_types'] == view].copy() for view in omics}
-
-# # Split batches for each omics (RNA only here)
-# batches = metadata["batch"].unique()
-# adata_RNA = adata_omics["GEX"]
-# RNA_batch = {batch: adata_RNA[adata_RNA.obs["batch"] == batch].copy() for batch in batches}
-
-# # HVGs selection on RNA data
-# HVGs_num = 1000
-# sc.pp.highly_variable_genes(adata_RNA, n_top_genes=HVGs_num, flavor='seurat_v3')
-# hvg = adata_RNA.var[adata_RNA.var["highly_variable"]].index
-# for batch, adata in RNA_batch.items():
-#     adata = adata[:, hvg].copy()
-#     RNA_batch[batch] = adata
-#     print(f"Batch {batch} has {adata.shape[0]} cells and {adata.shape[1]} genes after HVG selection")
-
-# batch_cell_num = [adata.shape[0] for adata in RNA_batch.values()]
-# RNA_batch_np = [adata.X.toarray() for adata in RNA_batch.values()]
-# RNA = np.vstack(RNA_batch_np)
-
-# # Standardize data
-# scaler = StandardScaler()
-# features = scaler.fit_transform(RNA)
-# X_list = []
-# for num in batch_cell_num:
-#     inter_data = features.copy()
-#     X_list.append(inter_data[:num, :])
-#     inter_data = inter_data[num:, :]
-
-# import pickle
-# with open("Real-SingleCell/RNA.pkl", "wb") as f:
-#     pickle.dump(X_list, f)
-
 def explained_variance_samples(X, M):
     """
     X: (n, d) data matrix for one batch
@@ -263,8 +215,8 @@ if __name__ == "__main__":
             break
     else:
         raise FileNotFoundError(
-            "RNA.pkl not found. Prepare it from h5ad (see commented code at top of this file) "
-            "and place in application/ or Real-SingleCell/"
+            "RNA.pkl not found. Run: python application/data-preprocess.py "
+            "(requires full12batch.h5ad in application/). See README for data source."
         )
 
     parser = argparse.ArgumentParser()
