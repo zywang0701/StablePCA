@@ -63,8 +63,8 @@ def randomized_eigh(A, k, n_oversample=10, n_iter=2, random_state=None):
         eval: Top k eigenvalues in descending order (k,)
         evec: Top k eigenvectors (p, k), columns are eigenvectors
     """
-    if random_state is not None:
-        np.random.seed(random_state)
+    # Use a local RNG to keep reproducibility without mutating NumPy's global RNG state.
+    rng = np.random.default_rng(random_state) if random_state is not None else np.random
     
     p = A.shape[0]
     if k >= p:
@@ -75,7 +75,7 @@ def randomized_eigh(A, k, n_oversample=10, n_iter=2, random_state=None):
     
     # Step 1: Generate random test matrix
     l = k + n_oversample  # Number of random vectors
-    Omega = np.random.randn(p, l)
+    Omega = rng.standard_normal((p, l))
     
     # Step 2: Power iteration to find approximate range of A
     # Y = (A^T @ A)^n_iter @ Omega ≈ A^(2*n_iter) @ Omega

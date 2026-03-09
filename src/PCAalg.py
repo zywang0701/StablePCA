@@ -352,14 +352,16 @@ class PCA_MP:
     # ----------------------------------------------- #
     def _compute_primal(self, Sigma_stack, M):
         """
-        Primal problem: given M, compute max_w -<M, Sigma(w)>
+        Primal problem (max-min): given M, compute
+            primal(M) = min_{w in simplex} <Sigma(w), M>
         """
-        vals = np.array([-np.trace(Sigma.T @ M) for Sigma in Sigma_stack], dtype=float)
-        return float(vals.max())
+        vals = np.array([np.trace(Sigma.T @ M) for Sigma in Sigma_stack], dtype=float)
+        return float(vals.min())
     
     def _compute_dual(self, Sigma_stack, w):
         """
-        Dual problem:Given w, compute min_M -<M, Sigma(w)>
+        Dual problem (max-min): given w, compute
+            dual(w) = max_{M in Fantope} <Sigma(w), M>
         """
         Sigma_w = np.einsum('i,ijk->jk', w, Sigma_stack)
 
@@ -368,7 +370,7 @@ class PCA_MP:
         idx = np.argsort(eval)[::-1][:self.n_components]
         U = evec[:, idx]
         M = U @ U.T
-        return float(-np.trace(Sigma_w.T @ M))
+        return float(np.trace(Sigma_w.T @ M))
 
     def _update_M_w(self, Sigma_stack, M_start, w_start, M_eval, w_eval, eta_M, eta_w, k, use_fast_logm=False, n_eig_override=None):
         """
