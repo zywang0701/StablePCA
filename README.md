@@ -120,9 +120,7 @@ jupyter notebook application/downstream.ipynb
 
 ---
 
-## Data
-
-### RNA.pkl (single-cell application)
+## Single-cell Data
 
 The single-cell data is **publicly available** from:
 
