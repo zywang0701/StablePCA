@@ -48,6 +48,8 @@ venv.bak/
 
 # Data files - ignore all data files to avoid committing large datasets
 *.h5ad
+# Exception: full12batch.h5ad is tracked via Git LFS for reproducibility
+!application/full12batch.h5ad
 *.pkl
 *.pkl.gz
 # Exception: RNA.pkl is tracked via Git LFS for reproducibility
