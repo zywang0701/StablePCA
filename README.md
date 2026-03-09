@@ -2,8 +2,7 @@
 
 This repository contains the code to reproduce the results in the paper:
 
-**StablePCA: Distributionally Robust Learning of Shared Representations from Multi-Source Data**  
-[https://arxiv.org/pdf/2505.00940](https://arxiv.org/pdf/2505.00940)
+**StablePCA: Distributionally Robust Learning of Shared Representations from Multi-Source Data**
 
 ## Quick Start
 
